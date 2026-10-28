@@ -2,7 +2,8 @@ import os
 import json
 import asyncio
 import logging
-from telethon import TelegramClient, errors
+from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -15,14 +16,13 @@ from copier import (
 
 logging.basicConfig(level=logging.INFO)
 
-TG_API_ID  = int(os.environ["TG_API_ID"])
+TG_API_ID   = int(os.environ["TG_API_ID"])
 TG_API_HASH = os.environ["TG_API_HASH"]
-BOT_TOKEN  = os.environ["BOT_TOKEN"]
-OWNER_ID   = int(os.environ["OWNER_ID"])
-TG_PHONE   = os.environ["TG_PHONE"]
+BOT_TOKEN   = os.environ["BOT_TOKEN"]
+OWNER_ID    = int(os.environ["OWNER_ID"])
 
-WAIT_OTP  = 1
-WAIT_2FA  = 2
+WAIT_OTP    = 1
+WAIT_2FA    = 2
 PICK_SOURCE = 3
 PICK_DEST   = 4
 CONFIRM     = 5
@@ -42,7 +42,6 @@ def owner_only(func):
 async def get_user_client():
     global user_client
     if user_client is None:
-        from telethon.sessions import StringSession
         session_str = os.environ.get("SESSION_STRING", "")
         user_client = TelegramClient(
             StringSession(session_str),
@@ -68,8 +67,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *TG Channel Copier Bot*\n\n"
         "Commands:\n"
-        "/login — Login karo\n"
-        "/copy — Source → Destination setup\n"
+        "/copy — Source → Destination setup karo\n"
         "/cache — Source cache karo\n"
         "/transfer — Transfer shuru karo\n"
         "/status — Progress dekho\n"
@@ -77,109 +75,6 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-
-# ── LOGIN ──────────────────────────────────────────────────────────────────────
-
-@owner_only
-async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    client = await get_user_client()
-
-    # already logged in check
-    try:
-        if await client.is_user_authorized():
-            me = await client.get_me()
-            await update.message.reply_text(
-                f"✅ Already logged in: *{me.first_name}*",
-                parse_mode="Markdown"
-            )
-            return ConversationHandler.END
-    except Exception:
-        pass
-
-    # send OTP
-    try:
-        result = await client.send_code_request(TG_PHONE)
-        ctx.user_data["phone_code_hash"] = result.phone_code_hash
-        await update.message.reply_text(
-            f"📱 OTP bheja gaya!\n\n"
-            f"Telegram app mein *Saved Messages* dekho\n"
-            f"Ya SMS check karo `{TG_PHONE}` pe\n\n"
-            f"Sirf *numbers* bhejo — jaise `12345`",
-            parse_mode="Markdown"
-        )
-        return WAIT_OTP
-
-    except errors.FloodWaitError as e:
-        await update.message.reply_text(
-            f"⏳ Bahut baar try kiya. {e.seconds} seconds baad try karo."
-        )
-        return ConversationHandler.END
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-        return ConversationHandler.END
-
-
-async def recv_otp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    otp    = update.message.text.strip().replace(" ", "")
-    client = await get_user_client()
-    phone_code_hash = ctx.user_data.get("phone_code_hash")
-
-    try:
-        await client.sign_in(
-            phone=TG_PHONE,
-            code=otp,
-            phone_code_hash=phone_code_hash
-        )
-        me = await client.get_me()
-        await update.message.reply_text(
-            f"✅ *Login successful!*\n"
-            f"Account: {me.first_name}\n\n"
-            f"Ab /copy bhejo.",
-            parse_mode="Markdown"
-        )
-        return ConversationHandler.END
-
-    except errors.SessionPasswordNeededError:
-        await update.message.reply_text(
-            "🔐 2FA enabled hai. Password bhejo:"
-        )
-        return WAIT_2FA
-
-    except errors.PhoneCodeInvalidError:
-        await update.message.reply_text(
-            "❌ OTP galat hai. /login dobara bhejo."
-        )
-        return ConversationHandler.END
-
-    except errors.PhoneCodeExpiredError:
-        await update.message.reply_text(
-            "❌ OTP expire ho gaya. /login dobara bhejo."
-        )
-        return ConversationHandler.END
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-        return ConversationHandler.END
-
-
-async def recv_2fa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    password = update.message.text.strip()
-    client   = await get_user_client()
-    try:
-        await client.sign_in(password=password)
-        me = await client.get_me()
-        await update.message.reply_text(
-            f"✅ *2FA login successful!*\n"
-            f"Account: {me.first_name}\n\n"
-            f"Ab /copy bhejo.",
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        await update.message.reply_text(f"❌ 2FA error: {e}")
-    return ConversationHandler.END
-
-
-# ── COPY SETUP ─────────────────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_copy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -191,7 +86,9 @@ async def cmd_copy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         authorized = False
 
     if not authorized:
-        await update.message.reply_text("❌ Pehle /login karo.")
+        await update.message.reply_text(
+            "❌ Session expired. Railway mein SESSION_STRING check karo."
+        )
         return ConversationHandler.END
 
     await update.message.reply_text("⏳ Channels load ho rahe hain...")
@@ -314,7 +211,7 @@ async def confirm_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     await query.edit_message_text(
-        f"⚡ *{action} shuru ho raha hai...*\n"
+        f"⚡ *Shuru ho raha hai...*\n"
         f"Updates yahan aate rahenge.",
         parse_mode="Markdown"
     )
@@ -327,9 +224,7 @@ async def confirm_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
 
     if action in ("do_cache", "do_full"):
-        await cache_source(
-            client, source.entity, cache_key, status_cb
-        )
+        await cache_source(client, source.entity, cache_key, status_cb)
 
     if action in ("do_transfer", "do_full"):
         await transfer_from_cache(
@@ -338,8 +233,6 @@ async def confirm_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
-
-# ── SHORTCUTS ──────────────────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -402,7 +295,7 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"📊 *Status*\n\n"
-        f"🔐 Logged in: `{'✅' if logged else '❌'}`\n"
+        f"🔐 Session: `{'✅ Active' if logged else '❌ Expired'}`\n"
         f"📥 Source: `{state.get('last_source_name','—')}`\n"
         f"📤 Dest: `{state.get('last_dest_name','—')}`\n"
         f"💾 Cached: `{cached}`\n"
@@ -422,23 +315,8 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Reset ho gaya.")
 
 
-# ── MAIN ──────────────────────────────────────────────────────────────────────
-
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    login_conv = ConversationHandler(
-        entry_points=[CommandHandler("login", cmd_login)],
-        states={
-            WAIT_OTP: [MessageHandler(
-                filters.TEXT & ~filters.COMMAND, recv_otp
-            )],
-            WAIT_2FA: [MessageHandler(
-                filters.TEXT & ~filters.COMMAND, recv_2fa
-            )],
-        },
-        fallbacks=[CommandHandler("login", cmd_login)],
-    )
 
     copy_conv = ConversationHandler(
         entry_points=[CommandHandler("copy", cmd_copy)],
@@ -455,7 +333,6 @@ def main():
     app.add_handler(CommandHandler("cache",    cmd_cache))
     app.add_handler(CommandHandler("transfer", cmd_transfer))
     app.add_handler(CommandHandler("reset",    cmd_reset))
-    app.add_handler(login_conv)
     app.add_handler(copy_conv)
 
     logging.info("Bot running...")
