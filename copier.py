@@ -5,10 +5,10 @@ import pickle
 from telethon import TelegramClient, errors
 from telethon.tl.types import MessageMediaWebPage
 
-MEDIA_DIR    = "downloads"
-CACHE_FILE   = "msg_cache.pkl"
-STATE_FILE   = "state.json"
-RETRIES      = 5
+MEDIA_DIR  = "downloads"
+CACHE_FILE = "msg_cache.pkl"
+STATE_FILE = "state.json"
+RETRIES    = 5
 
 os.makedirs(MEDIA_DIR, exist_ok=True)
 
@@ -47,9 +47,9 @@ async def download_with_retry(client, msg, status_cb=None):
                 return path
         except errors.FloodWaitError as e:
             if status_cb:
-                await status_cb(f"⏳ FloodWait: {e.seconds}s ruk rahe hain...")
+                await status_cb(f"⏳ FloodWait: {e.seconds}s...")
             await asyncio.sleep(e.seconds + 2)
-        except Exception as e:
+        except Exception:
             if attempt < RETRIES:
                 await asyncio.sleep(attempt * 3)
     return None
@@ -93,48 +93,53 @@ async def send_one(client, msg, dest_entity, status_cb=None):
         return False
 
 
-async def cache_source(client, source_entity, cache_key, status_cb=None):
+async def cache_source(client, source_id, cache_key, status_cb=None):
     cache     = load_cache()
     msg_store = cache.get(cache_key, {})
     last_id   = max(msg_store.keys()) if msg_store else 0
 
     if status_cb:
         await status_cb(
-            f"📥 *Phase 1: Caching shuru*\n"
+            f"📥 *Caching shuru*\n"
             f"Already cached: `{len(msg_store)}`\n"
-            f"Resume from ID: `{last_id}`"
+            f"Resume ID: `{last_id}`"
         )
 
     new_count = 0
     try:
+        # ID se directly access karo
+        source_entity = await client.get_entity(source_id)
+
         async for msg in client.iter_messages(
-            source_entity, reverse=True,
-            min_id=last_id, wait_time=1,
+            source_entity,
+            reverse=True,
+            min_id=last_id,
+            wait_time=2,
         ):
             if not msg or msg.action:
-                continue
-            if getattr(msg, "noforwards", False):
                 continue
 
             msg_store[msg.id] = msg
             new_count += 1
 
-            if new_count % 100 == 0:
+            if new_count % 50 == 0:
                 cache[cache_key] = msg_store
                 save_cache(cache)
                 if status_cb:
                     await status_cb(
-                        f"💾 Caching... `{len(msg_store)}` messages"
+                        f"💾 Cached: `{len(msg_store)}` messages\n"
+                        f"New this run: `{new_count}`"
                     )
 
     except errors.ChannelPrivateError:
         if status_cb:
             await status_cb(
-                "⚠️ Source se nikal gaye! Cache safe hai."
+                "⚠️ Channel private ho gaya!\n"
+                "Jo cache hua woh safe hai."
             )
     except Exception as e:
         if status_cb:
-            await status_cb(f"⚠️ Cache error: {e}")
+            await status_cb(f"⚠️ Error: {e}")
     finally:
         cache[cache_key] = msg_store
         save_cache(cache)
@@ -148,15 +153,16 @@ async def cache_source(client, source_entity, cache_key, status_cb=None):
     return msg_store
 
 
-async def transfer_from_cache(client, cache_key, dest_entity, state, status_cb=None):
+async def transfer_from_cache(client, cache_key, dest_id, state, status_cb=None):
     cache     = load_cache()
     msg_store = cache.get(cache_key, {})
 
     if not msg_store:
         if status_cb:
-            await status_cb("❌ Cache empty. Pehle /cache chalao.")
+            await status_cb("❌ Cache empty. Pehle cache karo.")
         return 0, 0
 
+    dest_entity     = await client.get_entity(dest_id)
     done_key        = cache_key + "_done"
     transferred_ids = set(state.get(done_key, []))
     sorted_ids      = sorted(msg_store.keys())
@@ -164,7 +170,7 @@ async def transfer_from_cache(client, cache_key, dest_entity, state, status_cb=N
 
     if status_cb:
         await status_cb(
-            f"📤 *Phase 2: Transfer shuru*\n"
+            f"📤 *Transfer shuru*\n"
             f"Total: `{len(sorted_ids)}`\n"
             f"Already sent: `{len(transferred_ids)}`\n"
             f"Remaining: `{len(remaining)}`"
@@ -193,14 +199,14 @@ async def transfer_from_cache(client, cache_key, dest_entity, state, status_cb=N
                 f"📊 Progress:\n"
                 f"✅ Sent: `{success}`\n"
                 f"❌ Failed: `{failed}`\n"
-                f"⏳ Remaining: `{len(remaining)-success-failed}`"
+                f"⏳ Left: `{len(remaining)-success-failed}`"
             )
 
-        await asyncio.sleep(0.8)
+        await asyncio.sleep(1)
 
     if status_cb:
         await status_cb(
-            f"🎉 *Transfer complete!*\n"
+            f"🎉 *Complete!*\n"
             f"✅ Success: `{success}`\n"
             f"❌ Failed: `{failed}`"
         )
