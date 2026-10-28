@@ -42,8 +42,12 @@ def owner_only(func):
 async def get_user_client():
     global user_client
     if user_client is None:
+        from telethon.sessions import StringSession
+        session_str = os.environ.get("SESSION_STRING", "")
         user_client = TelegramClient(
-            "user_session", TG_API_ID, TG_API_HASH
+            StringSession(session_str),
+            TG_API_ID,
+            TG_API_HASH
         )
     if not user_client.is_connected():
         await user_client.connect()
