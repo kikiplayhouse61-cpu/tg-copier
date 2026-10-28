@@ -94,7 +94,6 @@ async def send_one(client, msg, dest_entity, status_cb=None):
 
 
 async def cache_source(client, source_entity, cache_key, status_cb=None):
-    """Phase 1 — source se sab messages cache karo"""
     cache     = load_cache()
     msg_store = cache.get(cache_key, {})
     last_id   = max(msg_store.keys()) if msg_store else 0
@@ -125,15 +124,13 @@ async def cache_source(client, source_entity, cache_key, status_cb=None):
                 save_cache(cache)
                 if status_cb:
                     await status_cb(
-                        f"💾 Caching... `{len(msg_store)}` messages cached"
+                        f"💾 Caching... `{len(msg_store)}` messages"
                     )
 
     except errors.ChannelPrivateError:
         if status_cb:
             await status_cb(
-                "⚠️ Source se nikal gaye! "
-                "Jo cache hua hai woh safe hai. "
-                "Phase 2 se transfer jaari rahega."
+                "⚠️ Source se nikal gaye! Cache safe hai."
             )
     except Exception as e:
         if status_cb:
@@ -145,17 +142,13 @@ async def cache_source(client, source_entity, cache_key, status_cb=None):
     if status_cb:
         await status_cb(
             f"✅ *Cache complete!*\n"
-            f"Total messages: `{len(msg_store)}`\n"
-            f"New this run: `{new_count}`"
+            f"Total: `{len(msg_store)}`\n"
+            f"New: `{new_count}`"
         )
     return msg_store
 
 
-async def transfer_from_cache(
-    client, cache_key, dest_entity,
-    state, status_cb=None
-):
-    """Phase 2 — cache se destination pe bhejo"""
+async def transfer_from_cache(client, cache_key, dest_entity, state, status_cb=None):
     cache     = load_cache()
     msg_store = cache.get(cache_key, {})
 
@@ -172,14 +165,13 @@ async def transfer_from_cache(
     if status_cb:
         await status_cb(
             f"📤 *Phase 2: Transfer shuru*\n"
-            f"Total cached: `{len(sorted_ids)}`\n"
+            f"Total: `{len(sorted_ids)}`\n"
             f"Already sent: `{len(transferred_ids)}`\n"
             f"Remaining: `{len(remaining)}`"
         )
 
     success = 0
     failed  = 0
-    report_every = 50
 
     for msg_id in remaining:
         msg = msg_store.get(msg_id)
@@ -196,7 +188,7 @@ async def transfer_from_cache(
         else:
             failed += 1
 
-        if (success + failed) % report_every == 0 and status_cb:
+        if (success + failed) % 50 == 0 and status_cb:
             await status_cb(
                 f"📊 Progress:\n"
                 f"✅ Sent: `{success}`\n"
