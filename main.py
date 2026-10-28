@@ -2,7 +2,7 @@ import os
 import json
 import asyncio
 import logging
-from telethon import TelegramClient
+from telethon import TelegramClient, errors
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -15,42 +15,40 @@ from copier import (
 
 logging.basicConfig(level=logging.INFO)
 
-# ── ENV VARS (Railway mein set karo) ──────────────────────────────────────────
-TG_API_ID    = int(os.environ["TG_API_ID"])
-TG_API_HASH  = os.environ["TG_API_HASH"]
-BOT_TOKEN    = os.environ["BOT_TOKEN"]
-OWNER_ID     = int(os.environ["OWNER_ID"])
-TG_PHONE     = os.environ["TG_PHONE"]
+TG_API_ID  = int(os.environ["TG_API_ID"])
+TG_API_HASH = os.environ["TG_API_HASH"]
+BOT_TOKEN  = os.environ["BOT_TOKEN"]
+OWNER_ID   = int(os.environ["OWNER_ID"])
+TG_PHONE   = os.environ["TG_PHONE"]
 
-# ── STATES ────────────────────────────────────────────────────────────────────
-(
-    PICK_SOURCE,
-    PICK_DEST,
-    CONFIRM,
-    WAIT_OTP,
-) = range(4)
+WAIT_OTP  = 1
+WAIT_2FA  = 2
+PICK_SOURCE = 3
+PICK_DEST   = 4
+CONFIRM     = 5
 
-user_client  = None
-session_data = {}   # temporary picks storage
+user_client = None
 
-
-# ── HELPERS ───────────────────────────────────────────────────────────────────
 
 def owner_only(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        uid = (update.effective_user or update.callback_query.from_user).id
+        uid = update.effective_user.id if update.effective_user else 0
         if uid != OWNER_ID:
             return
         return await func(update, ctx)
     return wrapper
 
+
 async def get_user_client():
     global user_client
-    if user_client and user_client.is_connected():
-        return user_client
-    user_client = TelegramClient("user_session", TG_API_ID, TG_API_HASH)
-    await user_client.connect()
+    if user_client is None:
+        user_client = TelegramClient(
+            "user_session", TG_API_ID, TG_API_HASH
+        )
+    if not user_client.is_connected():
+        await user_client.connect()
     return user_client
+
 
 async def send_status(bot, text):
     try:
@@ -58,59 +56,137 @@ async def send_status(bot, text):
             chat_id=OWNER_ID, text=text, parse_mode="Markdown"
         )
     except Exception as e:
-        logging.warning(f"Status send fail: {e}")
+        logging.warning(f"status send fail: {e}")
 
-
-# ── /start ────────────────────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *TG Channel Copier Bot*\n\n"
         "Commands:\n"
-        "/login — Apne account se login karo\n"
-        "/copy — Source → Destination setup karo\n"
-        "/cache — Source ko cache karo\n"
-        "/transfer — Cache se destination pe bhejo\n"
-        "/status — Current progress dekho\n"
-        "/reset — Progress reset karo",
+        "/login — Login karo\n"
+        "/copy — Source → Destination setup\n"
+        "/cache — Source cache karo\n"
+        "/transfer — Transfer shuru karo\n"
+        "/status — Progress dekho\n"
+        "/reset — Reset karo",
         parse_mode="Markdown"
     )
 
 
-# ── /login ────────────────────────────────────────────────────────────────────
+# ── LOGIN ──────────────────────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_login(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     client = await get_user_client()
-    if await client.is_user_authorized():
-        await update.message.reply_text("✅ Already logged in!")
+
+    # already logged in check
+    try:
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            await update.message.reply_text(
+                f"✅ Already logged in: *{me.first_name}*",
+                parse_mode="Markdown"
+            )
+            return ConversationHandler.END
+    except Exception:
+        pass
+
+    # send OTP
+    try:
+        result = await client.send_code_request(TG_PHONE)
+        ctx.user_data["phone_code_hash"] = result.phone_code_hash
+        await update.message.reply_text(
+            f"📱 OTP bheja gaya!\n\n"
+            f"Telegram app mein *Saved Messages* dekho\n"
+            f"Ya SMS check karo `{TG_PHONE}` pe\n\n"
+            f"Sirf *numbers* bhejo — jaise `12345`",
+            parse_mode="Markdown"
+        )
+        return WAIT_OTP
+
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(
+            f"⏳ Bahut baar try kiya. {e.seconds} seconds baad try karo."
+        )
+        return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
         return ConversationHandler.END
 
-    await client.send_code_request(TG_PHONE)
-    await update.message.reply_text(
-        f"📱 OTP bheja gaya `{TG_PHONE}` pe.\nOTP reply karo:",
-        parse_mode="Markdown"
-    )
-    return WAIT_OTP
 
 async def recv_otp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    otp = update.message.text.strip()
+    otp    = update.message.text.strip().replace(" ", "")
     client = await get_user_client()
+    phone_code_hash = ctx.user_data.get("phone_code_hash")
+
     try:
-        await client.sign_in(TG_PHONE, otp)
-        await update.message.reply_text("✅ Login successful!")
+        await client.sign_in(
+            phone=TG_PHONE,
+            code=otp,
+            phone_code_hash=phone_code_hash
+        )
+        me = await client.get_me()
+        await update.message.reply_text(
+            f"✅ *Login successful!*\n"
+            f"Account: {me.first_name}\n\n"
+            f"Ab /copy bhejo.",
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    except errors.SessionPasswordNeededError:
+        await update.message.reply_text(
+            "🔐 2FA enabled hai. Password bhejo:"
+        )
+        return WAIT_2FA
+
+    except errors.PhoneCodeInvalidError:
+        await update.message.reply_text(
+            "❌ OTP galat hai. /login dobara bhejo."
+        )
+        return ConversationHandler.END
+
+    except errors.PhoneCodeExpiredError:
+        await update.message.reply_text(
+            "❌ OTP expire ho gaya. /login dobara bhejo."
+        )
+        return ConversationHandler.END
+
     except Exception as e:
-        await update.message.reply_text(f"❌ Login fail: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+        return ConversationHandler.END
+
+
+async def recv_2fa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    password = update.message.text.strip()
+    client   = await get_user_client()
+    try:
+        await client.sign_in(password=password)
+        me = await client.get_me()
+        await update.message.reply_text(
+            f"✅ *2FA login successful!*\n"
+            f"Account: {me.first_name}\n\n"
+            f"Ab /copy bhejo.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ 2FA error: {e}")
     return ConversationHandler.END
 
 
-# ── /copy — pick source + dest ────────────────────────────────────────────────
+# ── COPY SETUP ─────────────────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_copy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     client = await get_user_client()
-    if not await client.is_user_authorized():
+
+    try:
+        authorized = await client.is_user_authorized()
+    except Exception:
+        authorized = False
+
+    if not authorized:
         await update.message.reply_text("❌ Pehle /login karo.")
         return ConversationHandler.END
 
@@ -126,51 +202,54 @@ async def cmd_copy(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     ctx.user_data["all_channels"] = channels
+
     buttons = []
     for i, ch in enumerate(channels[:30]):
         buttons.append([InlineKeyboardButton(
-            f"📢 {ch.name[:35]}", callback_data=f"src_{i}"
+            f"📢 {ch.name[:40]}", callback_data=f"src_{i}"
         )])
 
     await update.message.reply_text(
-        "📥 *SOURCE channel chuno* (jahan se copy karna hai):",
+        "📥 *SOURCE channel chuno*\n(jahan se copy karna hai):",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown"
     )
     return PICK_SOURCE
 
+
 async def pick_source(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    idx = int(query.data.replace("src_", ""))
+    idx      = int(query.data.replace("src_", ""))
     channels = ctx.user_data["all_channels"]
     source   = channels[idx]
     ctx.user_data["source"] = source
 
-    # destination — owned/admin channels only
     owned = [
         ch for ch in channels
         if getattr(ch.entity, "creator", False)
         or getattr(ch.entity, "admin_rights", None)
     ]
+
     if not owned:
-        await query.edit_message_text("❌ Koi owned channel nahi mila.")
+        await query.edit_message_text("❌ Koi owned/admin channel nahi mila.")
         return ConversationHandler.END
 
     ctx.user_data["owned"] = owned
     buttons = []
     for i, ch in enumerate(owned[:20]):
         buttons.append([InlineKeyboardButton(
-            f"✅ {ch.name[:35]}", callback_data=f"dst_{i}"
+            f"✅ {ch.name[:40]}", callback_data=f"dst_{i}"
         )])
 
     await query.edit_message_text(
         f"✅ Source: *{source.name}*\n\n"
-        f"📤 *DESTINATION channel chuno*:",
+        f"📤 *DESTINATION chuno*:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown"
     )
     return PICK_DEST
+
 
 async def pick_dest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -180,55 +259,61 @@ async def pick_dest(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     dest  = owned[idx]
     ctx.user_data["dest"] = dest
 
-    source   = ctx.user_data["source"]
+    source    = ctx.user_data["source"]
     cache_key = f"{source.id}:{dest.id}"
     ctx.user_data["cache_key"] = cache_key
 
-    # save selection to state
     state = load_state()
-    state["last_source_id"]   = source.id
-    state["last_source_name"] = source.name
-    state["last_dest_id"]     = dest.id
-    state["last_dest_name"]   = dest.name
-    state["last_cache_key"]   = cache_key
+    state.update({
+        "last_source_id":   source.id,
+        "last_source_name": source.name,
+        "last_dest_id":     dest.id,
+        "last_dest_name":   dest.name,
+        "last_cache_key":   cache_key,
+    })
     save_state(state)
 
-    cache     = load_cache()
-    cached    = len(cache.get(cache_key, {}))
-    done_ids  = len(state.get(cache_key + "_done", []))
+    cache    = load_cache()
+    cached   = len(cache.get(cache_key, {}))
+    done_ids = len(state.get(cache_key + "_done", []))
 
     buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📥 Cache karo", callback_data="do_cache")],
-        [InlineKeyboardButton("📤 Transfer karo", callback_data="do_transfer")],
-        [InlineKeyboardButton("🔄 Full run (cache + transfer)", callback_data="do_full")],
+        [InlineKeyboardButton("📥 Sirf Cache karo", callback_data="do_cache")],
+        [InlineKeyboardButton("📤 Sirf Transfer karo", callback_data="do_transfer")],
+        [InlineKeyboardButton("🔄 Full Run (Cache + Transfer)", callback_data="do_full")],
     ])
 
     await query.edit_message_text(
-        f"✅ *Selection complete!*\n\n"
+        f"✅ *Setup complete!*\n\n"
         f"📥 Source: `{source.name}`\n"
         f"📤 Dest: `{dest.name}`\n"
-        f"💾 Cached messages: `{cached}`\n"
-        f"✅ Already transferred: `{done_ids}`\n\n"
+        f"💾 Cached: `{cached}` messages\n"
+        f"✅ Already sent: `{done_ids}`\n\n"
         f"Kya karna hai?",
         reply_markup=buttons,
         parse_mode="Markdown"
     )
     return CONFIRM
 
+
 async def confirm_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query  = update.callback_query
     await query.answer()
     action = query.data
-
-    await query.edit_message_text(f"⏳ Starting `{action}`...", parse_mode="Markdown")
 
     source    = ctx.user_data.get("source")
     dest      = ctx.user_data.get("dest")
     cache_key = ctx.user_data.get("cache_key")
 
     if not source or not dest:
-        await send_status(ctx.bot, "❌ Source ya dest nahi mila. /copy dobara karo.")
+        await query.edit_message_text("❌ /copy dobara karo.")
         return ConversationHandler.END
+
+    await query.edit_message_text(
+        f"⚡ *{action} shuru ho raha hai...*\n"
+        f"Updates yahan aate rahenge.",
+        parse_mode="Markdown"
+    )
 
     client = await get_user_client()
 
@@ -238,7 +323,9 @@ async def confirm_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     state = load_state()
 
     if action in ("do_cache", "do_full"):
-        await cache_source(client, source.entity, cache_key, status_cb)
+        await cache_source(
+            client, source.entity, cache_key, status_cb
+        )
 
     if action in ("do_transfer", "do_full"):
         await transfer_from_cache(
@@ -248,55 +335,51 @@ async def confirm_action(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
-# ── /cache — shortcut ─────────────────────────────────────────────────────────
+# ── SHORTCUTS ──────────────────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_cache(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    state = load_state()
+    state     = load_state()
     cache_key = state.get("last_cache_key")
     src_id    = state.get("last_source_id")
-    if not cache_key or not src_id:
-        await update.message.reply_text("❌ Pehle /copy se source/dest set karo.")
+    if not cache_key:
+        await update.message.reply_text("❌ Pehle /copy se setup karo.")
         return
-
     client = await get_user_client()
-    await update.message.reply_text("📥 Caching shuru ho raha hai...")
+    await update.message.reply_text("📥 Caching shuru...")
 
     async def status_cb(msg):
         await send_status(ctx.bot, msg)
 
     try:
-        source_entity = await client.get_entity(int(src_id))
-        await cache_source(client, source_entity, cache_key, status_cb)
+        src_entity = await client.get_entity(int(src_id))
+        await cache_source(client, src_entity, cache_key, status_cb)
     except Exception as e:
-        await send_status(ctx.bot, f"❌ Cache error: {e}")
+        await send_status(ctx.bot, f"❌ Error: {e}")
 
-
-# ── /transfer — shortcut ──────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_transfer(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    state = load_state()
+    state     = load_state()
     cache_key = state.get("last_cache_key")
     dst_id    = state.get("last_dest_id")
-    if not cache_key or not dst_id:
-        await update.message.reply_text("❌ Pehle /copy se source/dest set karo.")
+    if not cache_key:
+        await update.message.reply_text("❌ Pehle /copy se setup karo.")
         return
-
     client = await get_user_client()
-    await update.message.reply_text("📤 Transfer shuru ho raha hai...")
+    await update.message.reply_text("📤 Transfer shuru...")
 
     async def status_cb(msg):
         await send_status(ctx.bot, msg)
 
     try:
-        dest_entity = await client.get_entity(int(dst_id))
-        await transfer_from_cache(client, cache_key, dest_entity, state, status_cb)
+        dst_entity = await client.get_entity(int(dst_id))
+        await transfer_from_cache(
+            client, cache_key, dst_entity, state, status_cb
+        )
     except Exception as e:
-        await send_status(ctx.bot, f"❌ Transfer error: {e}")
+        await send_status(ctx.bot, f"❌ Error: {e}")
 
-
-# ── /status ───────────────────────────────────────────────────────────────────
 
 @owner_only
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -306,8 +389,16 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cached    = len(cache.get(cache_key, {}))
     done      = len(state.get(cache_key + "_done", []))
 
+    client = await get_user_client()
+    logged = False
+    try:
+        logged = await client.is_user_authorized()
+    except Exception:
+        pass
+
     await update.message.reply_text(
         f"📊 *Status*\n\n"
+        f"🔐 Logged in: `{'✅' if logged else '❌'}`\n"
         f"📥 Source: `{state.get('last_source_name','—')}`\n"
         f"📤 Dest: `{state.get('last_dest_name','—')}`\n"
         f"💾 Cached: `{cached}`\n"
@@ -317,8 +408,6 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ── /reset ────────────────────────────────────────────────────────────────────
-
 @owner_only
 async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for f in ["state.json", "msg_cache.pkl"]:
@@ -326,7 +415,7 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             os.remove(f)
         except:
             pass
-    await update.message.reply_text("✅ Progress reset ho gaya.")
+    await update.message.reply_text("✅ Reset ho gaya.")
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
@@ -336,8 +425,15 @@ def main():
 
     login_conv = ConversationHandler(
         entry_points=[CommandHandler("login", cmd_login)],
-        states={WAIT_OTP: [MessageHandler(filters.TEXT, recv_otp)]},
-        fallbacks=[],
+        states={
+            WAIT_OTP: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, recv_otp
+            )],
+            WAIT_2FA: [MessageHandler(
+                filters.TEXT & ~filters.COMMAND, recv_2fa
+            )],
+        },
+        fallbacks=[CommandHandler("login", cmd_login)],
     )
 
     copy_conv = ConversationHandler(
@@ -347,7 +443,7 @@ def main():
             PICK_DEST:   [CallbackQueryHandler(pick_dest,   pattern="^dst_")],
             CONFIRM:     [CallbackQueryHandler(confirm_action, pattern="^do_")],
         },
-        fallbacks=[],
+        fallbacks=[CommandHandler("copy", cmd_copy)],
     )
 
     app.add_handler(CommandHandler("start",    cmd_start))
@@ -358,7 +454,7 @@ def main():
     app.add_handler(login_conv)
     app.add_handler(copy_conv)
 
-    logging.info("Bot start ho gaya...")
+    logging.info("Bot running...")
     app.run_polling(drop_pending_updates=True)
 
 
